@@ -2,6 +2,10 @@
 
 🚀 A powerful bridge between Ollama and the Model Context Protocol (MCP), enabling seamless integration of Ollama's local LLM capabilities into your MCP-powered applications.
 
+<a href="https://glama.ai/mcp/servers/sxt5su901q">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/sxt5su901q/badge" alt="Ollama Server MCP server" />
+</a>
+
 ## 🌟 Features
 
 ### Complete Ollama Integration
