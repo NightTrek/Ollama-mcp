@@ -162,11 +162,26 @@ class OllamaServer {
           },
         },
         {
-          name: 'list',
-          description: 'List models',
+          name: 'list_models',
+          description: 'List available Ollama models with their details.',
           inputSchema: {
             type: 'object',
             properties: {},
+            additionalProperties: false,
+          },
+        },
+        {
+          name: 'get_model_info',
+          description: 'Show detailed information for a specific Ollama model.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              name: {
+                type: 'string',
+                description: 'Name of the model',
+              },
+            },
+            required: ['name'],
             additionalProperties: false,
           },
         },
@@ -265,8 +280,10 @@ class OllamaServer {
             return await this.handlePull(request.params.arguments);
           case 'push':
             return await this.handlePush(request.params.arguments);
-          case 'list':
-            return await this.handleList();
+          case 'list_models':
+            return await this.handleListModels();
+          case 'get_model_info':
+            return await this.handleGetModelInfo(request.params.arguments);
           case 'cp':
             return await this.handleCopy(request.params.arguments);
           case 'rm':
@@ -420,19 +437,55 @@ class OllamaServer {
     }
   }
 
-  private async handleList() {
+  private async handleListModels() {
     try {
-      const { stdout, stderr } = await execAsync('ollama list');
+      const response = await axios.get(`${OLLAMA_HOST}/api/tags`, {
+        timeout: DEFAULT_TIMEOUT,
+      });
       return {
         content: [
           {
-            type: 'text',
-            text: stdout || stderr,
+            type: 'json',
+            json: response.data.models,
           },
         ],
       };
     } catch (error) {
+      if (axios.isAxiosError(error)) {
+        throw new McpError(
+          ErrorCode.InternalError,
+          `Ollama API error: ${error.response?.data?.error || error.message}`
+        );
+      }
       throw new McpError(ErrorCode.InternalError, `Failed to list models: ${formatError(error)}`);
+    }
+  }
+
+  private async handleGetModelInfo(args: any) {
+    try {
+      const response = await axios.post(
+        `${OLLAMA_HOST}/api/show`,
+        { name: args.name },
+        {
+          timeout: DEFAULT_TIMEOUT,
+        }
+      );
+      return {
+        content: [
+          {
+            type: 'json',
+            json: response.data,
+          },
+        ],
+      };
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        throw new McpError(
+          ErrorCode.InternalError,
+          `Ollama API error: ${error.response?.data?.error || error.message}`
+        );
+      }
+      throw new McpError(ErrorCode.InternalError, `Failed to get model info: ${formatError(error)}`);
     }
   }
 
