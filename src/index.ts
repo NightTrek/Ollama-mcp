@@ -1,44 +1,82 @@
 #!/usr/bin/env node
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+
 import {
+  Server,
+  StdioServerTransport,
+  SSEServerTransport,
   CallToolRequestSchema,
+  type CallToolRequest,
   ErrorCode,
   ListToolsRequestSchema,
   McpError,
-} from '@modelcontextprotocol/sdk/types.js';
-import axios from 'axios';
+} from '@modelcontextprotocol/sdk';
 import { exec } from 'child_process';
-import { promisify } from 'util';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { Transform } from 'node:stream';
+import { OllamaApi } from './ollama-api.js';
+import { tools } from './tools.js';
 
-const execAsync = promisify(exec);
+// Create a union type of all valid tool names from the tools definition file.
+type ToolName = typeof tools[number]['name'];
 
-// Default Ollama API endpoint
-const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://127.0.0.1:11434';
-const DEFAULT_TIMEOUT = 60000; // 60 seconds default timeout
-
-interface OllamaGenerateResponse {
-  model: string;
-  created_at: string;
+// --- Ollama Stream Response Types ---
+// These interfaces describe the possible JSON objects in Ollama's streaming responses.
+interface OllamaGenerateStreamPart {
   response: string;
-  done: boolean;
 }
+interface OllamaChatStreamPart {
+  message?: {
+    content: string;
+  };
+}
+interface OllamaProgressStreamPart {
+  status: string;
+}
+type OllamaStreamPart = Partial<
+  OllamaGenerateStreamPart & OllamaChatStreamPart & OllamaProgressStreamPart
+>;
 
-// Helper function to format error messages
-const formatError = (error: unknown): string => {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
+// Helper to create a stream that parses Ollama's line-delimited JSON
+const createOllamaStreamParser = () => {
+  return new Transform({
+    transform(chunk, encoding, callback) {
+      try {
+        const data = chunk.toString();
+        // Ollama streams multiple JSON objects, sometimes in one chunk.
+        const lines = data.split('\n').filter((line: string) => line.trim() !== '');
+        for (const line of lines) {
+          const json: OllamaStreamPart = JSON.parse(line);
+          // For 'generate' and 'run'
+          if (typeof json.response === 'string') {
+            this.push(json.response);
+          }
+          // For 'chat'
+          else if (json.message?.content) {
+            this.push(json.message.content);
+          }
+          // For 'pull', 'push', 'create'
+          else if (typeof json.status === 'string') {
+            this.push(`${json.status}\n`);
+          }
+        }
+        callback();
+      } catch (error) {
+        callback(new McpError(
+          ErrorCode.InternalError,
+          `Error processing stream: ${error instanceof Error ? error.message : String(error)}`
+        ));
+      }
+    }
+  });
 };
 
 class OllamaServer {
   private server: Server;
+  private ollamaApi: OllamaApi;
 
   constructor() {
+    this.ollamaApi = new OllamaApi();
     this.server = new Server(
       {
         name: 'ollama-mcp',
@@ -52,9 +90,8 @@ class OllamaServer {
     );
 
     this.setupToolHandlers();
-    
-    // Error handling
-    this.server.onerror = (error) => console.error('[MCP Error]', error);
+
+    this.server.onerror = (error: Error) => console.error('[MCP Error]', error);
     process.on('SIGINT', async () => {
       await this.server.close();
       process.exit(0);
@@ -63,550 +100,128 @@ class OllamaServer {
 
   private setupToolHandlers() {
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: [
-        {
-          name: 'serve',
-          description: 'Start Ollama server',
-          inputSchema: {
-            type: 'object',
-            properties: {},
-            additionalProperties: false,
-          },
-        },
-        {
-          name: 'create',
-          description: 'Create a model from a Modelfile',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              name: {
-                type: 'string',
-                description: 'Name for the model',
-              },
-              modelfile: {
-                type: 'string',
-                description: 'Path to Modelfile',
-              },
-            },
-            required: ['name', 'modelfile'],
-            additionalProperties: false,
-          },
-        },
-        {
-          name: 'show',
-          description: 'Show information for a model',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              name: {
-                type: 'string',
-                description: 'Name of the model',
-              },
-            },
-            required: ['name'],
-            additionalProperties: false,
-          },
-        },
-        {
-          name: 'run',
-          description: 'Run a model',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              name: {
-                type: 'string',
-                description: 'Name of the model',
-              },
-              prompt: {
-                type: 'string',
-                description: 'Prompt to send to the model',
-              },
-              timeout: {
-                type: 'number',
-                description: 'Timeout in milliseconds (default: 60000)',
-                minimum: 1000,
-              },
-            },
-            required: ['name', 'prompt'],
-            additionalProperties: false,
-          },
-        },
-        {
-          name: 'pull',
-          description: 'Pull a model from a registry',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              name: {
-                type: 'string',
-                description: 'Name of the model to pull',
-              },
-            },
-            required: ['name'],
-            additionalProperties: false,
-          },
-        },
-        {
-          name: 'push',
-          description: 'Push a model to a registry',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              name: {
-                type: 'string',
-                description: 'Name of the model to push',
-              },
-            },
-            required: ['name'],
-            additionalProperties: false,
-          },
-        },
-        {
-          name: 'list_models',
-          description: 'List available Ollama models with their details.',
-          inputSchema: {
-            type: 'object',
-            properties: {},
-            additionalProperties: false,
-          },
-        },
-        {
-          name: 'get_model_info',
-          description: 'Show detailed information for a specific Ollama model.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              name: {
-                type: 'string',
-                description: 'Name of the model',
-              },
-            },
-            required: ['name'],
-            additionalProperties: false,
-          },
-        },
-        {
-          name: 'cp',
-          description: 'Copy a model',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              source: {
-                type: 'string',
-                description: 'Source model name',
-              },
-              destination: {
-                type: 'string',
-                description: 'Destination model name',
-              },
-            },
-            required: ['source', 'destination'],
-            additionalProperties: false,
-          },
-        },
-        {
-          name: 'rm',
-          description: 'Remove a model',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              name: {
-                type: 'string',
-                description: 'Name of the model to remove',
-              },
-            },
-            required: ['name'],
-            additionalProperties: false,
-          },
-        },
-        {
-          name: 'chat_completion',
-          description: 'OpenAI-compatible chat completion API',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              model: {
-                type: 'string',
-                description: 'Name of the Ollama model to use',
-              },
-              messages: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  properties: {
-                    role: {
-                      type: 'string',
-                      enum: ['system', 'user', 'assistant'],
-                    },
-                    content: {
-                      type: 'string',
-                    },
-                  },
-                  required: ['role', 'content'],
-                },
-                description: 'Array of messages in the conversation',
-              },
-              temperature: {
-                type: 'number',
-                description: 'Sampling temperature (0-2)',
-                minimum: 0,
-                maximum: 2,
-              },
-              timeout: {
-                type: 'number',
-                description: 'Timeout in milliseconds (default: 60000)',
-                minimum: 1000,
-              },
-            },
-            required: ['model', 'messages'],
-            additionalProperties: false,
-          },
-        },
-      ],
+      tools: [...tools],
     }));
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
+      const { name, arguments: args } = request.params; // args is still 'any'
+
+      // Type guard to ensure the tool name is valid before entering the switch.
+      const isKnownTool = (name: string): name is ToolName => {
+        return tools.some((t) => t.name === name);
+      };
+
+      if (!isKnownTool(name)) {
+        throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+      }
       try {
-        switch (request.params.name) {
+        // Thanks to the guard, 'name' is now correctly typed as ToolName.
+        switch (name) {
           case 'serve':
-            return await this.handleServe();
+            return this.handleServe();
           case 'create':
-            return await this.handleCreate(request.params.arguments);
-          case 'show':
-            return await this.handleShow(request.params.arguments);
+            return this.handleStreamedCommand((api) => api.create(args.name, args.modelfile));
           case 'run':
-            return await this.handleRun(request.params.arguments);
+            return this.handleStreamedCommand((api) => api.generate(args.name, args.prompt, args.timeout));
           case 'pull':
-            return await this.handlePull(request.params.arguments);
+            return this.handleStreamedCommand((api) => api.pull(args.name));
           case 'push':
-            return await this.handlePush(request.params.arguments);
-          case 'list_models':
-            return await this.handleListModels();
-          case 'get_model_info':
-            return await this.handleGetModelInfo(request.params.arguments);
-          case 'cp':
-            return await this.handleCopy(request.params.arguments);
-          case 'rm':
-            return await this.handleRemove(request.params.arguments);
+            return this.handleStreamedCommand((api) => api.push(args.name));
           case 'chat_completion':
-            return await this.handleChatCompletion(request.params.arguments);
-          default:
-            throw new McpError(
-              ErrorCode.MethodNotFound,
-              `Unknown tool: ${request.params.name}`
+            return this.handleStreamedCommand((api) => api.chat(args.model, args.messages, args.temperature, args.timeout));
+          case 'show':
+          case 'get_model_info':
+            return this.handleJsonCommand((api) => api.getModelInfo(args.name));
+          case 'list_models':
+            return this.handleJsonCommand((api) => api.listModels());
+          case 'cp':
+            return this.handleVoidCommand(
+              (api) => api.copy(args.source, args.destination),
+              `Successfully copied model from ${args.source} to ${args.destination}.`
+            );
+          case 'rm':
+            return this.handleVoidCommand(
+              (api) => api.remove(args.name),
+              `Successfully removed model: ${args.name}.`
             );
         }
       } catch (error) {
         if (error instanceof McpError) throw error;
         throw new McpError(
           ErrorCode.InternalError,
-          `Error executing ${request.params.name}: ${formatError(error)}`
+          `Error executing ${name}: ${error instanceof Error ? error.message : String(error)}`
         );
       }
     });
   }
 
   private async handleServe() {
-    try {
-      const { stdout, stderr } = await execAsync('ollama serve');
-      return {
-        content: [
-          {
-            type: 'text',
-            text: stdout || stderr,
-          },
-        ],
-      };
-    } catch (error) {
-      throw new McpError(ErrorCode.InternalError, `Failed to start Ollama server: ${formatError(error)}`);
-    }
-  }
-
-  private async handleCreate(args: any) {
-    try {
-      const { stdout, stderr } = await execAsync(`ollama create ${args.name} -f ${args.modelfile}`);
-      return {
-        content: [
-          {
-            type: 'text',
-            text: stdout || stderr,
-          },
-        ],
-      };
-    } catch (error) {
-      throw new McpError(ErrorCode.InternalError, `Failed to create model: ${formatError(error)}`);
-    }
-  }
-
-  private async handleShow(args: any) {
-    try {
-      const { stdout, stderr } = await execAsync(`ollama show ${args.name}`);
-      return {
-        content: [
-          {
-            type: 'text',
-            text: stdout || stderr,
-          },
-        ],
-      };
-    } catch (error) {
-      throw new McpError(ErrorCode.InternalError, `Failed to show model info: ${formatError(error)}`);
-    }
-  }
-
-  private async handleRun(args: any) {
-    try {
-      // Use streaming mode with SSE
-      const response = await axios.post(
-        `${OLLAMA_HOST}/api/generate`,
+    // This still needs to use exec as it's a long-running process
+    // on the host machine, not a simple API call.
+    const child = exec('ollama serve');
+    return {
+      content: [
         {
-          model: args.name,
-          prompt: args.prompt,
-          stream: true,
+          type: 'text',
+          text: `Ollama serve process started with PID: ${child.pid}. Check server logs for output.`,
         },
+      ],
+    };
+  }
+
+  private async handleStreamedCommand(
+    apiCall: (api: OllamaApi) => Promise<NodeJS.ReadableStream>
+  ) {
+    const stream = await apiCall(this.ollamaApi);
+    return {
+      content: [
         {
-          timeout: args.timeout || DEFAULT_TIMEOUT,
-          responseType: 'stream'
-        }
-      );
-
-      // Create a transform stream to process the SSE events
-      const transformStream = new TransformStream({
-        transform(chunk, controller) {
-          try {
-            const data = chunk.toString();
-            const json = JSON.parse(data);
-            controller.enqueue(json.response);
-          } catch (error) {
-            controller.error(new McpError(
-              ErrorCode.InternalError,
-              `Error processing stream: ${formatError(error)}`
-            ));
-          }
-        }
-      });
-
-      return {
-        content: [
-          {
-            type: 'stream',
-            stream: response.data.pipeThrough(transformStream),
-          },
-        ],
-      };
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        throw new McpError(
-          ErrorCode.InternalError,
-          `Ollama API error: ${error.response?.data?.error || error.message}`
-        );
-      }
-      throw new McpError(ErrorCode.InternalError, `Failed to run model: ${formatError(error)}`);
-    }
-  }
-
-  private async handlePull(args: any) {
-    try {
-      const { stdout, stderr } = await execAsync(`ollama pull ${args.name}`);
-      return {
-        content: [
-          {
-            type: 'text',
-            text: stdout || stderr,
-          },
-        ],
-      };
-    } catch (error) {
-      throw new McpError(ErrorCode.InternalError, `Failed to pull model: ${formatError(error)}`);
-    }
-  }
-
-  private async handlePush(args: any) {
-    try {
-      const { stdout, stderr } = await execAsync(`ollama push ${args.name}`);
-      return {
-        content: [
-          {
-            type: 'text',
-            text: stdout || stderr,
-          },
-        ],
-      };
-    } catch (error) {
-      throw new McpError(ErrorCode.InternalError, `Failed to push model: ${formatError(error)}`);
-    }
-  }
-
-  private async handleListModels() {
-    try {
-      const response = await axios.get(`${OLLAMA_HOST}/api/tags`, {
-        timeout: DEFAULT_TIMEOUT,
-      });
-      return {
-        content: [
-          {
-            type: 'json',
-            json: response.data.models,
-          },
-        ],
-      };
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        throw new McpError(
-          ErrorCode.InternalError,
-          `Ollama API error: ${error.response?.data?.error || error.message}`
-        );
-      }
-      throw new McpError(ErrorCode.InternalError, `Failed to list models: ${formatError(error)}`);
-    }
-  }
-
-  private async handleGetModelInfo(args: any) {
-    try {
-      const response = await axios.post(
-        `${OLLAMA_HOST}/api/show`,
-        { name: args.name },
-        {
-          timeout: DEFAULT_TIMEOUT,
-        }
-      );
-      return {
-        content: [
-          {
-            type: 'json',
-            json: response.data,
-          },
-        ],
-      };
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        throw new McpError(
-          ErrorCode.InternalError,
-          `Ollama API error: ${error.response?.data?.error || error.message}`
-        );
-      }
-      throw new McpError(ErrorCode.InternalError, `Failed to get model info: ${formatError(error)}`);
-    }
-  }
-
-  private async handleCopy(args: any) {
-    try {
-      const { stdout, stderr } = await execAsync(`ollama cp ${args.source} ${args.destination}`);
-      return {
-        content: [
-          {
-            type: 'text',
-            text: stdout || stderr,
-          },
-        ],
-      };
-    } catch (error) {
-      throw new McpError(ErrorCode.InternalError, `Failed to copy model: ${formatError(error)}`);
-    }
-  }
-
-  private async handleRemove(args: any) {
-    try {
-      const { stdout, stderr } = await execAsync(`ollama rm ${args.name}`);
-      return {
-        content: [
-          {
-            type: 'text',
-            text: stdout || stderr,
-          },
-        ],
-      };
-    } catch (error) {
-      throw new McpError(ErrorCode.InternalError, `Failed to remove model: ${formatError(error)}`);
-    }
-  }
-
-  private async handleChatCompletion(args: any) {
-    try {
-      // Convert chat messages to a single prompt
-      const prompt = args.messages
-        .map((msg: any) => {
-          switch (msg.role) {
-            case 'system':
-              return `System: ${msg.content}\n`;
-            case 'user':
-              return `User: ${msg.content}\n`;
-            case 'assistant':
-              return `Assistant: ${msg.content}\n`;
-            default:
-              return '';
-          }
-        })
-        .join('');
-
-      // Make request to Ollama API with configurable timeout and raw mode
-      const response = await axios.post<OllamaGenerateResponse>(
-        `${OLLAMA_HOST}/api/generate`,
-        {
-          model: args.model,
-          prompt,
-          stream: false,
-          temperature: args.temperature,
-          raw: true, // Add raw mode for more direct responses
+          type: 'stream',
+          stream: stream.pipe(createOllamaStreamParser()),
         },
-        {
-          timeout: args.timeout || DEFAULT_TIMEOUT,
-        }
-      );
+      ],
+    };
+  }
 
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              id: 'chatcmpl-' + Date.now(),
-              object: 'chat.completion',
-              created: Math.floor(Date.now() / 1000),
-              model: args.model,
-              choices: [
-                {
-                  index: 0,
-                  message: {
-                    role: 'assistant',
-                    content: response.data.response,
-                  },
-                  finish_reason: 'stop',
-                },
-              ],
-            }, null, 2),
-          },
-        ],
-      };
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        throw new McpError(
-          ErrorCode.InternalError,
-          `Ollama API error: ${error.response?.data?.error || error.message}`
-        );
-      }
-      throw new McpError(ErrorCode.InternalError, `Unexpected error: ${formatError(error)}`);
-    }
+  private async handleJsonCommand(apiCall: (api: OllamaApi) => Promise<any>) {
+    const data = await apiCall(this.ollamaApi);
+    return {
+      content: [
+        {
+          type: 'json',
+          json: data,
+        },
+      ],
+    };
+  }
+
+  private async handleVoidCommand(
+    apiCall: (api: OllamaApi) => Promise<void>,
+    successMessage: string
+  ) {
+    await apiCall(this.ollamaApi);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: successMessage,
+        },
+      ],
+    };
   }
 
   async run() {
-    // Create HTTP server for SSE transport
     const server = http.createServer();
-    
-    // Create stdio transport
     const stdioTransport = new StdioServerTransport();
-    
-    // Connect stdio transport
     await this.server.connect(stdioTransport);
-    
-    // Setup SSE endpoint
-    server.on('request', (req: import('http').IncomingMessage, res: import('http').ServerResponse) => {
+
+    server.on('request', (req, res) => {
       if (req.url === '/message') {
-        const sseTransport = new SSEServerTransport(req.url || '/message', res);
+        const sseTransport = new SSEServerTransport(req.url, res);
         this.server.connect(sseTransport);
       }
     });
-    
-    // Start HTTP server
+
     server.listen(0, () => {
       const address = server.address() as AddressInfo;
       console.error(`Ollama MCP server running on stdio and SSE (http://localhost:${address.port})`);
