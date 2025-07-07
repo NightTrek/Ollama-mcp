@@ -1,15 +1,26 @@
 {
+  "extends": "../../config/tsconfig.base.json",
   "compilerOptions": {
+    "outDir": "./build",
+    "rootDir": "src",
+    "noEmit": false,
     "target": "ES2022",
     "module": "Node16",
     "moduleResolution": "Node16",
-    "outDir": "./build",
-    "rootDir": "./src",
+    "baseUrl": ".",
+    "paths": {
+      "@modelcontextprotocol/sdk": ["../../packages/sdk/src"],
+      "@modelcontextprotocol/runtime": ["../../packages/runtime/src"]
+    },
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
+  "references": [
+    { "path": "../../packages/runtime" },
+    { "path": "../../packages/sdk" }
+  ],
   "include": ["src/**/*"],
   "exclude": ["node_modules"]
 }

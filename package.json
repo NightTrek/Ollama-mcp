@@ -11,13 +11,14 @@
     "build"
   ],
   "scripts": {
-    "build": "tsc && node -e \"import('node:fs').then(fs => fs.chmodSync('build/index.js', '755'))\"",
-    "prepare": "npm run build",
-    "watch": "tsc --watch",
+    "build": "tsc --build && node -e \"import('node:fs').then(fs => fs.chmodSync('build/index.js', '755'))\"",
+    "prepare": "pnpm run build",
+    "start": "node ./build/index.js",
+    "watch": "tsc --build --watch",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "0.6.0",
+    "@modelcontextprotocol/sdk": "workspace:*",
     "axios": "^1.7.9"
   },
   "devDependencies": {
