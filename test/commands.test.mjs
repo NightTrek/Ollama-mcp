@@ -34,7 +34,15 @@ const untrustedFields = [
 
 test('Ollama CLI tools over MCP', { timeout: 60_000 }, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'ollama-mcp-test-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  let client;
+  t.after(async () => {
+    try {
+      await client?.close();
+    } finally {
+      // Windows can briefly retain file locks after child processes exit.
+      await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
   const executable = join(directory, process.platform === 'win32' ? 'ollama.exe' : 'ollama');
   await copyFile(process.execPath, executable);
   await chmod(executable, 0o755);
@@ -52,13 +60,12 @@ test('Ollama CLI tools over MCP', { timeout: 60_000 }, async (t) => {
     if (key !== 'PATH' && key.toUpperCase() === 'PATH') delete env[key];
   }
 
-  const client = new Client({ name: 'ollama-security-tests', version: '1.0.0' }, { capabilities: {} });
+  client = new Client({ name: 'ollama-security-tests', version: '1.0.0' }, { capabilities: {} });
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [fileURLToPath(new URL('../build/index.js', import.meta.url))],
     env,
   });
-  t.after(() => client.close());
   await client.connect(transport);
 
   async function callTool(name, args) {
