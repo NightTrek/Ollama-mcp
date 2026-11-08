@@ -134,6 +134,18 @@ await mcp.use_mcp_tool({
 
 ## 🤝 Contributing
 
+### Development checks
+
+Run `pnpm test` to build the server and run the MCP regression tests (Node.js 20 or newer).
+The tests use a local stand-in executable; Ollama and downloaded models are not required.
+CI runs the same checks on Linux and Windows with Node.js 20, 22, and 24.
+
+### Model-management arguments
+
+Ollama CLI tools pass model names and Modelfile paths as literal arguments without a shell.
+Paths containing spaces do not need extra shell quotes. Shell expressions and environment
+variables in these arguments are not expanded; supply the actual path instead.
+
 Contributions are welcome! Feel free to:
 - Report bugs
 - Suggest new features
