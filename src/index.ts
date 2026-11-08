@@ -9,12 +9,13 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import axios from 'axios';
-import { exec } from 'child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'util';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-const execAsync = promisify(exec);
+// Keep MCP arguments out of a shell: each value is a literal CLI argument.
+const execFileAsync = promisify(execFile);
 
 // Default Ollama API endpoint
 const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://127.0.0.1:11434';
@@ -291,7 +292,7 @@ class OllamaServer {
 
   private async handleServe() {
     try {
-      const { stdout, stderr } = await execAsync('ollama serve');
+      const { stdout, stderr } = await execFileAsync('ollama', ['serve']);
       return {
         content: [
           {
@@ -307,7 +308,7 @@ class OllamaServer {
 
   private async handleCreate(args: any) {
     try {
-      const { stdout, stderr } = await execAsync(`ollama create ${args.name} -f ${args.modelfile}`);
+      const { stdout, stderr } = await execFileAsync('ollama', ['create', args.name, '-f', args.modelfile]);
       return {
         content: [
           {
@@ -323,7 +324,7 @@ class OllamaServer {
 
   private async handleShow(args: any) {
     try {
-      const { stdout, stderr } = await execAsync(`ollama show ${args.name}`);
+      const { stdout, stderr } = await execFileAsync('ollama', ['show', args.name]);
       return {
         content: [
           {
@@ -390,7 +391,7 @@ class OllamaServer {
 
   private async handlePull(args: any) {
     try {
-      const { stdout, stderr } = await execAsync(`ollama pull ${args.name}`);
+      const { stdout, stderr } = await execFileAsync('ollama', ['pull', args.name]);
       return {
         content: [
           {
@@ -406,7 +407,7 @@ class OllamaServer {
 
   private async handlePush(args: any) {
     try {
-      const { stdout, stderr } = await execAsync(`ollama push ${args.name}`);
+      const { stdout, stderr } = await execFileAsync('ollama', ['push', args.name]);
       return {
         content: [
           {
@@ -422,7 +423,7 @@ class OllamaServer {
 
   private async handleList() {
     try {
-      const { stdout, stderr } = await execAsync('ollama list');
+      const { stdout, stderr } = await execFileAsync('ollama', ['list']);
       return {
         content: [
           {
@@ -438,7 +439,7 @@ class OllamaServer {
 
   private async handleCopy(args: any) {
     try {
-      const { stdout, stderr } = await execAsync(`ollama cp ${args.source} ${args.destination}`);
+      const { stdout, stderr } = await execFileAsync('ollama', ['cp', args.source, args.destination]);
       return {
         content: [
           {
@@ -454,7 +455,7 @@ class OllamaServer {
 
   private async handleRemove(args: any) {
     try {
-      const { stdout, stderr } = await execAsync(`ollama rm ${args.name}`);
+      const { stdout, stderr } = await execFileAsync('ollama', ['rm', args.name]);
       return {
         content: [
           {
