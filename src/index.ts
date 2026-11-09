@@ -340,41 +340,28 @@ class OllamaServer {
 
   private async handleRun(args: any) {
     try {
-      // Use streaming mode with SSE
-      const response = await axios.post(
+      // MCP tool results contain completed text, not a transport-specific stream.
+      const response = await axios.post<OllamaGenerateResponse>(
         `${OLLAMA_HOST}/api/generate`,
         {
           model: args.name,
           prompt: args.prompt,
-          stream: true,
+          stream: false,
         },
         {
           timeout: args.timeout || DEFAULT_TIMEOUT,
-          responseType: 'stream'
         }
       );
 
-      // Create a transform stream to process the SSE events
-      const transformStream = new TransformStream({
-        transform(chunk, controller) {
-          try {
-            const data = chunk.toString();
-            const json = JSON.parse(data);
-            controller.enqueue(json.response);
-          } catch (error) {
-            controller.error(new McpError(
-              ErrorCode.InternalError,
-              `Error processing stream: ${formatError(error)}`
-            ));
-          }
-        }
-      });
+      if (typeof response.data?.response !== 'string') {
+        throw new Error('Invalid Ollama response: expected a string in "response"');
+      }
 
       return {
         content: [
           {
-            type: 'stream',
-            stream: response.data.pipeThrough(transformStream),
+            type: 'text',
+            text: response.data.response,
           },
         ],
       };
