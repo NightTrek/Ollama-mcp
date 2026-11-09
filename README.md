@@ -92,6 +92,11 @@ await mcp.use_mcp_tool({
 });
 ```
 
+The `run` tool waits for Ollama to finish generation and returns the complete response
+as MCP text content. It requests `stream: false`; tokens are not streamed incrementally.
+Whitespace and empty responses are preserved. Ollama HTTP errors, connection failures,
+timeouts, and malformed responses are reported as MCP errors.
+
 ### Chat Completion (OpenAI-compatible)
 ```typescript
 await mcp.use_mcp_tool({
@@ -137,7 +142,8 @@ await mcp.use_mcp_tool({
 ### Development checks
 
 Run `pnpm test` to build the server and run the MCP regression tests (Node.js 20 or newer).
-The tests use a local stand-in executable; Ollama and downloaded models are not required.
+The tests use a local stand-in executable and a mock Ollama HTTP API; Ollama and
+downloaded models are not required.
 CI runs the same checks on Linux and Windows with Node.js 20, 22, and 24.
 
 ### Model-management arguments
